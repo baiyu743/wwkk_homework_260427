@@ -1,0 +1,126 @@
+﻿变更说明：毕业资格审核模块 & 数据统计分析模块
+
+一、变更范围
+1）文件改动
+- 课设.py：在管理员主界面新增“毕业资格审核”“数据统计分析”两个入口，并加入对应模块的页面切换。
+- admin_modules.py：新增两个模块类 GraduationQualificationModule、DataStatisticsAnalysisModule；新增毕业审核数据表的自动初始化；新增报表导出（CSV/PDF）能力。
+
+2）新增数据库对象（自动创建）
+- dbo.PGraduationReviews：用于记录毕业资格审核流程状态、毕业状态、未通过原因、档案生成时间等。
+  字段说明（表结构以 admin_modules.py 的 ensure_graduation_review_tables() 为准）：
+  - StudentID：学生学号（主键，关联 PStudents.StudentID）
+  - InitiatedAt / InitiatedBy：审核发起时间/发起人
+  - ClassCheckStatus / ClassCheckedAt：班级核对结论（通过/不通过）与时间
+  - FinalReviewStatus / FinalReviewedAt：审核状态与终审时间（状态包含：未发起/已发起/班级核对通过/班级核对不通过/终审通过/终审不通过）
+  - GraduationStatus：毕业状态（毕业/结业/肄业/未通过）
+  - FailureReason：未通过原因（支持多原因拼接）
+  - ArchiveGeneratedAt：档案生成时间（TXT/PDF生成后写入）
+
+二、模块功能说明
+1）毕业资格审核模块（6个功能单元）
+- 页面筛选：支持按“学号/班级/专业”筛选列表（学号精确匹配；班级/专业为 LIKE 模糊匹配），点击“刷新”触发查询。
+- 审核发起：对选中学生创建/更新审核记录，审核状态标记为“已发起”（区别于班级核对与终审）。
+- 班级核对：对选中学生自动核对学籍完整性、学费状态、挂科情况，并写入核对结论与原因。
+- 终审审核：对选中学生进行终审，自动给出“通过/不通过”，并更新毕业状态与原因。
+- 状态标记：对选中学生按规则自动标记毕业状态（毕业/结业/肄业/未通过）。
+- 档案生成：对选中学生导出毕业资格档案（TXT + PDF），并记录档案生成时间。
+- 异常处理：对选中学生手动填写未通过原因，并标记为“不通过/未通过”。
+
+2）数据统计分析模块（5个功能单元）
+- 学籍基础统计：统计人数、班级分布、男女比例、入学年份趋势。
+- 异动数据统计：按入学状态/学费状态汇总统计。
+- 成绩数据统计：统计平均分、优秀率、挂科率，并给出学生平均分Top20排名。
+- 毕业数据统计：按毕业状态汇总人数，并给出通过率（毕业/结业占比）。
+- 报表输出：将当前统计结果表导出为Excel可打开的CSV或PDF。
+  说明：CSV 导出使用 export_table_to_csv()；PDF 导出使用 export_table_to_pdf()（支持A4、换行、自动分页与重复表头）。
+
+三、关键实现位置（代码索引）
+1）毕业资格审核（admin_modules.py）
+- 页面入口类：GraduationQualificationModule
+- 筛选输入框创建：GraduationQualificationModule.initUI() 内 student_id_filter / class_filter / major_filter + refresh_btn
+- 筛选查询与表格刷新：GraduationQualificationModule.load_students()
+- 审核数据写入（插入/更新）：GraduationQualificationModule.upsert_review()
+- 审核发起：GraduationQualificationModule.initiate_review()
+- 班级核对（自动核对+写入原因）：GraduationQualificationModule.class_check() + GraduationQualificationModule.get_student_problems()
+- 终审审核：GraduationQualificationModule.final_review()
+- 毕业状态自动标记：GraduationQualificationModule.auto_mark_status() + GraduationQualificationModule.compute_graduation_status()
+- 档案生成：GraduationQualificationModule.generate_archives()（TXT/PDF）+ export_table_to_pdf()
+- 异常处理：GraduationQualificationModule.handle_exception()
+
+2）数据统计分析（admin_modules.py）
+- 页面入口类：DataStatisticsAnalysisModule
+- 学籍基础统计：load_basic_stats()
+- 异动数据统计：load_status_stats()
+- 成绩数据统计：load_grade_stats()
+- 毕业数据统计：load_graduation_stats()
+- 报表导出：export_csv() / export_pdf()
+
+3）页面接入（课设.py）
+- 管理员主界面入口按钮：AdminDashboard.initUI() 内 “毕业资格审核”“数据统计分析”
+- 页面栈接入：AdminDashboard.initUI() 内 QStackedWidget addWidget(GraduationQualificationModule/DataStatisticsAnalysisModule)
+- 页面切换：AdminDashboard.manage_graduation_review() / AdminDashboard.manage_data_analysis()
+
+四、验证步骤（功能验收）
+1）毕业资格审核模块
+- 管理员登录 → 点击“毕业资格审核”
+- 在筛选栏输入条件（学号/班级/专业任意组合）→ 点击“刷新” → 列表应按条件变化（学号精确；班级/专业模糊）
+- 选中任意学生（可多选）→ 点击“审核发起”→ 表格“审核状态”变为“已发起”
+- 点击“班级核对”→ 表格“审核状态”变为“班级核对通过/班级核对不通过”；若存在挂科/学费未缴/学籍异常，“未通过原因”应有内容
+- 点击“状态标记”→ 表格“毕业状态”应更新（毕业/结业/肄业/未通过）
+- 点击“终审审核”→ 表格“审核状态”应更新为“终审通过/终审不通过”
+- 点击“档案生成”→ 选择导出目录，检查生成的 TXT/PDF 文件内容是否与表格一致
+- 点击“异常处理”→ 输入原因后，“审核状态/毕业状态/未通过原因”应更新
+
+2）数据统计分析模块
+- 管理员登录 → 点击“数据统计分析”
+- 分别点击“学籍基础统计/异动数据统计/成绩数据统计/毕业数据统计”
+- 检查顶部摘要与表格数据是否随按钮切换而变化
+- 点击“导出Excel(CSV)”→ 用 Excel/WPS 打开导出文件，检查列名与数据完整
+- 点击“导出PDF”→ 打开PDF检查标题与表格内容
+
+五、注意事项
+- 本次变更不会修改既有表结构（PStudents/PGrades等），只新增毕业审核记录表 dbo.PGraduationReviews（程序自动创建）。
+- 若数据库为空或没有成绩数据，统计模块中的部分指标可能显示为0或空值，属于正常情况。
+- 毕业资格审核模块的列表统计依赖 PStudents 与 PGrades：若学生无成绩记录，平均分可能为空，挂科数按 0 处理。
+- 若需要更直观的展示效果，建议准备较多测试数据（例如 50 条学生 + 每人多条成绩），以覆盖“挂科/学费未缴/学籍异常/正常通过”等场景。
+
+六、行级改动说明（按文件）
+1）admin_modules.py
+- L1-L6：补充导入 QAbstractItemView、QItemSelectionModel、QPageSize、QPageLayout、QMarginsF、QRect 等。
+  作用：支持“整行多选/批量选择”的表格交互；支持 PDF 导出时的 A4 页面、边距与精确绘制区域计算。
+- L22-L51：ensure_graduation_review_tables() 自动建表逻辑。
+  作用：程序启动/模块打开时确保 dbo.PGraduationReviews 存在，用于保存毕业资格审核流程状态与档案生成时间等。
+- L72-L187：export_table_to_pdf() 重写 PDF 绘制逻辑。
+  作用：
+  a) 通过 pageLayout().paintRectPixels() 获取真实可绘制区域，修复导出 PDF “内容堆叠/不显示”的问题；
+  b) 按表格列宽比例分配 PDF 列宽并做缩放兜底，避免列宽为 0；
+  c) 单元格启用自动换行并按内容计算行高，超页自动分页并重复表头，提升可读性。
+- L1700-L2181：新增 GraduationQualificationModule（毕业资格审核页面：筛选、批处理、状态流转、档案导出）。
+  作用：管理员端对学生毕业资格进行发起/核对/终审/标记/异常处理等流程化操作，并将过程数据落库到 dbo.PGraduationReviews。
+- L1716-L1743：筛选栏（学号/班级/专业）与“刷新”按钮。
+  作用：提供页面级筛选入口；刷新按钮触发 load_students() 重新查询并刷新表格。
+- L1869-L1947：load_students() 动态拼接 SQL 条件（StudentID 精确；Class/Major 模糊）并查询填充表格。
+  作用：完成毕业资格审核页面的筛选查询与列表渲染，是筛选功能的核心实现。
+- L1786-L1842：毕业资格审核模块新增“全选/反选/清空选择”按钮与对应方法（select_all_rows / invert_selection / clear_selection）。
+  作用：减少逐行勾选成本，支持一键批量选择/取消选择，配合后续“审核发起/班级核对/终审审核”等批处理操作。
+- L1818-L1819：毕业资格审核表格选择模式调整为 SelectRows + ExtendedSelection。
+  作用：支持整行选中、Ctrl 多选、Shift 连选、Ctrl+A 全选等常用批量选择方式。
+- L1974-L1984：initiate_review() 增加 Cancel 分支处理（ok=False 直接 return）。
+  作用：修复“弹框点击 Cancel 仍然发起成功”的问题，只有点击 OK 才会写入/更新审核发起记录。
+- L2135-L2156：generate_archives() 中的 PDF 输出逻辑调整（A4/边距/绘制区域/自动换行与分页）。
+  作用：保证档案 PDF 文本不会堆叠或越界，长内容可换行并跨页输出。
+- L2182-L2437：新增 DataStatisticsAnalysisModule（学籍/异动/成绩/毕业统计 + 导出）。
+  作用：管理员端对学生数据进行统计汇总，并支持将统计结果导出为 CSV/PDF 作为报表使用。
+- L2414-L2436：数据统计分析模块导出功能（export_csv/export_pdf）调用统一导出函数。
+  作用：CSV 用于 Excel/WPS 直接打开；PDF 导出复用 export_table_to_pdf 的分页/换行能力，保证展示稳定。
+注：行号可能会随代码格式化/插入内容轻微漂移，定位时优先使用“函数名/类名”检索。
+
+2）课设.py
+- L10-L12：管理员端导入 GraduationQualificationModule、DataStatisticsAnalysisModule。
+  作用：让管理员主界面能够实例化并切换到“毕业资格审核/数据统计分析”两个新模块页面。
+- L418-L428：新增两个入口按钮“毕业资格审核”“数据统计分析”，并绑定点击事件（manage_graduation_review/manage_data_analysis）。
+  作用：管理员主界面提供可视化入口，点击即可进入对应模块。
+- L442-L452：在 QStackedWidget 中初始化并 addWidget() 两个新模块实例。
+  作用：把新模块纳入统一页面栈管理，实现与原有模块一致的无弹窗页面切换体验。
+- L483-L487：新增页面切换方法 manage_graduation_review() / manage_data_analysis()。
+  作用：按钮点击后切换 stacked_widget 当前页到对应模块。

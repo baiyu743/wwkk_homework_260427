@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import pyodbc
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QLineEdit, QMessageBox, \
@@ -8,7 +8,8 @@ from teacher_modules import (GradeEntryWindow, GradeSearchWindow, StudentManagem
                              TeacherPasswordWindow)
 from student_modules import (StudentDashboard)
 from admin_modules import (StudentInfoModule,  GradeInfoModule, CourseInfoModule,
-                           PasswordManagementModule, AwardsInfoModule)
+                           PasswordManagementModule, AwardsInfoModule,
+                           GraduationQualificationModule, DataStatisticsAnalysisModule)
 # 连接到 SQL Server 数据库
 def connect_to_db():
     try:
@@ -414,6 +415,18 @@ class AdminDashboard(QWidget):
         self.password_manage_button.clicked.connect(self.modify_password)
         button_layout.addWidget(self.password_manage_button)
 
+        self.graduation_review_button = QPushButton('毕业资格审核', self)
+        self.graduation_review_button.setStyleSheet(
+            'background-color: #607D8B; color: white; font: 22px Arial; padding: 15px 30px; border-radius: 5px;')
+        self.graduation_review_button.clicked.connect(self.manage_graduation_review)
+        button_layout.addWidget(self.graduation_review_button)
+
+        self.data_analysis_button = QPushButton('数据统计分析', self)
+        self.data_analysis_button.setStyleSheet(
+            'background-color: #3F51B5; color: white; font: 22px Arial; padding: 15px 30px; border-radius: 5px;')
+        self.data_analysis_button.clicked.connect(self.manage_data_analysis)
+        button_layout.addWidget(self.data_analysis_button)
+
         layout.addLayout(button_layout)
 
         # 创建QStackedWidget用于切换不同模块
@@ -426,6 +439,8 @@ class AdminDashboard(QWidget):
         self.course_management_module = CourseInfoModule()
         self.password_management_module = PasswordManagementModule()
         self.awards_management_module = AwardsInfoModule()
+        self.graduation_qualification_module = GraduationQualificationModule()
+        self.data_statistics_analysis_module = DataStatisticsAnalysisModule()
 
         # 将模块添加到stacked widget中
         self.stacked_widget.addWidget(self.student_info_module)
@@ -433,6 +448,8 @@ class AdminDashboard(QWidget):
         self.stacked_widget.addWidget(self.course_management_module)
         self.stacked_widget.addWidget(self.password_management_module)
         self.stacked_widget.addWidget(self.awards_management_module)
+        self.stacked_widget.addWidget(self.graduation_qualification_module)
+        self.stacked_widget.addWidget(self.data_statistics_analysis_module)
 
         # 退出按钮
         self.exit_button = QPushButton('退出', self)
@@ -462,6 +479,12 @@ class AdminDashboard(QWidget):
     def modify_password(self):
         """修改密码功能"""
         self.stacked_widget.setCurrentWidget(self.password_management_module)
+
+    def manage_graduation_review(self):
+        self.stacked_widget.setCurrentWidget(self.graduation_qualification_module)
+
+    def manage_data_analysis(self):
+        self.stacked_widget.setCurrentWidget(self.data_statistics_analysis_module)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

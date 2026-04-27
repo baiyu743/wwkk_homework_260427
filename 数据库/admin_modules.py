@@ -1,7 +1,9 @@
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+﻿from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QTableWidget,
-                             QTableWidgetItem, QHeaderView, QMessageBox)
-from PyQt5.QtCore import Qt
+                             QTableWidgetItem, QHeaderView, QMessageBox,
+                             QFileDialog, QInputDialog, QAbstractItemView)
+from PyQt5.QtGui import QPdfWriter, QPainter, QFont, QPageSize, QPageLayout
+from PyQt5.QtCore import Qt, QDateTime, QRect, QMarginsF, QItemSelectionModel
 import pyodbc
 
 def connect_to_db():
@@ -16,6 +18,173 @@ def connect_to_db():
     except Exception as e:
         QMessageBox.warning(None, "数据库连接失败", f"错误信息：{str(e)}")
         return None
+
+def ensure_graduation_review_tables():
+    conn = connect_to_db()
+    if not conn:
+        return False
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            IF OBJECT_ID(N'dbo.PGraduationReviews', N'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.PGraduationReviews(
+                    StudentID varchar(10) NOT NULL PRIMARY KEY,
+                    InitiatedAt datetime2 NULL,
+                    InitiatedBy nvarchar(50) NULL,
+                    ClassCheckStatus nvarchar(20) NULL,
+                    ClassCheckedAt datetime2 NULL,
+                    FinalReviewStatus nvarchar(20) NULL,
+                    FinalReviewedAt datetime2 NULL,
+                    GraduationStatus nvarchar(20) NULL,
+                    FailureReason nvarchar(max) NULL,
+                    ArchiveGeneratedAt datetime2 NULL
+                );
+            END
+        """)
+        conn.commit()
+        return True
+    except Exception as e:
+        QMessageBox.warning(None, "数据库初始化失败", f"错误信息：{str(e)}")
+        return False
+    finally:
+        conn.close()
+
+def export_table_to_csv(table_widget, file_path):
+    headers = []
+    for c in range(table_widget.columnCount()):
+        header_item = table_widget.horizontalHeaderItem(c)
+        headers.append(header_item.text() if header_item else "")
+
+    with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
+        f.write(",".join([h.replace('\"', '\"\"') for h in headers]) + "\n")
+        for r in range(table_widget.rowCount()):
+            row_values = []
+            for c in range(table_widget.columnCount()):
+                item = table_widget.item(r, c)
+                value = item.text() if item else ""
+                value = value.replace('\"', '\"\"')
+                if "," in value or "\n" in value or "\r" in value:
+                    value = f"\"{value}\""
+                row_values.append(value)
+            f.write(",".join(row_values) + "\n")
+
+def export_table_to_pdf(table_widget, file_path, title):
+    writer = QPdfWriter(file_path)
+    writer.setResolution(120)
+    writer.setPageSize(QPageSize(QPageSize.A4))
+    try:
+        writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Millimeter)
+    except Exception:
+        pass
+    painter = QPainter(writer)
+    painter.setPen(Qt.black)
+
+    paint_rect = writer.pageLayout().paintRectPixels(writer.resolution())
+    left = paint_rect.left()
+    top = paint_rect.top()
+    available_width = paint_rect.width()
+    available_height = paint_rect.height()
+    bottom_limit = top + available_height
+
+    x = left
+    y = top
+
+    painter.setFont(QFont("Arial", 14))
+    title_height = painter.fontMetrics().height() + 12
+    painter.drawText(QRect(x, y, available_width, title_height), Qt.AlignLeft | Qt.AlignVCenter, title)
+    y += title_height + 8
+
+    painter.setFont(QFont("Arial", 10))
+    base_font_metrics = painter.fontMetrics()
+    cell_padding_v = 6
+    cell_padding_h = 6
+    min_col_width = 60
+
+    headers = []
+    for c in range(table_widget.columnCount()):
+        header_item = table_widget.horizontalHeaderItem(c)
+        headers.append(header_item.text() if header_item else "")
+
+    col_count = max(1, table_widget.columnCount())
+    screen_widths = []
+    total_screen_width = 0
+    for c in range(col_count):
+        w = table_widget.columnWidth(c)
+        w = w if w and w > 0 else 1
+        screen_widths.append(w)
+        total_screen_width += w
+
+    col_widths = []
+    for c in range(col_count):
+        w = int(available_width * screen_widths[c] / total_screen_width) if total_screen_width else int(available_width / col_count)
+        col_widths.append(max(min_col_width, w))
+
+    sum_col_widths = sum(col_widths)
+    if sum_col_widths > available_width and sum_col_widths > 0:
+        scale = available_width / sum_col_widths
+        col_widths = [max(40, int(w * scale)) for w in col_widths]
+
+    if sum(col_widths) < available_width and col_widths:
+        col_widths[-1] += available_width - sum(col_widths)
+
+    def draw_header_row(current_y):
+        header_font = QFont("Arial", 10)
+        header_font.setBold(True)
+        painter.setFont(header_font)
+        header_height = painter.fontMetrics().height() + cell_padding_v * 2
+        cx = x
+        for i in range(col_count):
+            rect = QRect(cx, current_y, col_widths[i], header_height)
+            painter.drawRect(rect)
+            painter.drawText(
+                QRect(rect.left() + cell_padding_h, rect.top() + cell_padding_v, rect.width() - cell_padding_h * 2, rect.height() - cell_padding_v * 2),
+                Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap,
+                headers[i] if i < len(headers) else ""
+            )
+            cx += col_widths[i]
+        painter.setFont(QFont("Arial", 10))
+        return header_height
+
+    def new_page_and_header():
+        writer.newPage()
+        painter.setFont(QFont("Arial", 10))
+        return top, draw_header_row(top)
+
+    header_height = draw_header_row(y)
+    y += header_height
+
+    text_flags = Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap
+    for r in range(table_widget.rowCount()):
+        row_texts = []
+        for c in range(col_count):
+            item = table_widget.item(r, c)
+            row_texts.append(item.text() if item else "")
+
+        row_height = 0
+        for c in range(col_count):
+            content_rect = QRect(0, 0, max(1, col_widths[c] - cell_padding_h * 2), 10000)
+            h = base_font_metrics.boundingRect(content_rect, text_flags, row_texts[c]).height() + cell_padding_v * 2
+            row_height = max(row_height, h)
+        row_height = max(row_height, base_font_metrics.height() + cell_padding_v * 2)
+
+        if y + row_height > bottom_limit:
+            y, header_height = new_page_and_header()
+            y += header_height
+
+        cx = x
+        for c in range(col_count):
+            rect = QRect(cx, y, col_widths[c], row_height)
+            painter.drawRect(rect)
+            painter.drawText(
+                QRect(rect.left() + cell_padding_h, rect.top() + cell_padding_v, rect.width() - cell_padding_h * 2, rect.height() - cell_padding_v * 2),
+                text_flags,
+                row_texts[c]
+            )
+            cx += col_widths[c]
+        y += row_height
+
+    painter.end()
 
 # 1.学生管理模块
 class StudentInfoModule(QWidget):
@@ -1526,3 +1695,744 @@ class PasswordManagementModule(QWidget):
         elif "提示" in title:
             msg.setIcon(QMessageBox.Warning)
         msg.exec_()
+
+
+class GraduationQualificationModule(QWidget):
+    def __init__(self):
+        super().__init__()
+        ensure_graduation_review_tables()
+        self.initUI()
+
+    def initUI(self):
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        title = QLabel('毕业资格审核', self)
+        title.setStyleSheet("font: 24px Arial; color: #4CAF50; text-align: center;")
+        title.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(title)
+
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(10)
+
+        self.student_id_filter = QLineEdit(self)
+        self.student_id_filter.setPlaceholderText("学号（可选）")
+        self.student_id_filter.setStyleSheet("font: 16px Arial; padding: 8px; min-width: 150px;")
+        filter_layout.addWidget(QLabel("学号：", self))
+        filter_layout.addWidget(self.student_id_filter)
+
+        self.class_filter = QLineEdit(self)
+        self.class_filter.setPlaceholderText("班级（可选）")
+        self.class_filter.setStyleSheet("font: 16px Arial; padding: 8px; min-width: 150px;")
+        filter_layout.addWidget(QLabel("班级：", self))
+        filter_layout.addWidget(self.class_filter)
+
+        self.major_filter = QLineEdit(self)
+        self.major_filter.setPlaceholderText("专业（可选）")
+        self.major_filter.setStyleSheet("font: 16px Arial; padding: 8px; min-width: 150px;")
+        filter_layout.addWidget(QLabel("专业：", self))
+        filter_layout.addWidget(self.major_filter)
+
+        self.refresh_btn = QPushButton('刷新', self)
+        self.refresh_btn.setStyleSheet(
+            'background-color: #2196F3; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.refresh_btn.clicked.connect(self.load_students)
+        filter_layout.addWidget(self.refresh_btn)
+
+        main_layout.addLayout(filter_layout)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        self.initiate_btn = QPushButton('审核发起', self)
+        self.initiate_btn.setStyleSheet(
+            'background-color: #4CAF50; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.initiate_btn.clicked.connect(self.initiate_review)
+        btn_layout.addWidget(self.initiate_btn)
+
+        self.class_check_btn = QPushButton('班级核对', self)
+        self.class_check_btn.setStyleSheet(
+            'background-color: #FF9800; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.class_check_btn.clicked.connect(self.class_check)
+        btn_layout.addWidget(self.class_check_btn)
+
+        self.final_review_btn = QPushButton('终审审核', self)
+        self.final_review_btn.setStyleSheet(
+            'background-color: #9C27B0; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.final_review_btn.clicked.connect(self.final_review)
+        btn_layout.addWidget(self.final_review_btn)
+
+        self.auto_mark_btn = QPushButton('状态标记', self)
+        self.auto_mark_btn.setStyleSheet(
+            'background-color: #607D8B; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.auto_mark_btn.clicked.connect(self.auto_mark_status)
+        btn_layout.addWidget(self.auto_mark_btn)
+
+        self.archive_btn = QPushButton('档案生成', self)
+        self.archive_btn.setStyleSheet(
+            'background-color: #795548; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.archive_btn.clicked.connect(self.generate_archives)
+        btn_layout.addWidget(self.archive_btn)
+
+        self.exception_btn = QPushButton('异常处理', self)
+        self.exception_btn.setStyleSheet(
+            'background-color: #F44336; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.exception_btn.clicked.connect(self.handle_exception)
+        btn_layout.addWidget(self.exception_btn)
+
+        main_layout.addLayout(btn_layout)
+
+        selection_layout = QHBoxLayout()
+        selection_layout.setSpacing(10)
+
+        self.select_all_btn = QPushButton('全选', self)
+        self.select_all_btn.setStyleSheet(
+            'background-color: #9E9E9E; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.select_all_btn.clicked.connect(self.select_all_rows)
+        selection_layout.addWidget(self.select_all_btn)
+
+        self.invert_select_btn = QPushButton('反选', self)
+        self.invert_select_btn.setStyleSheet(
+            'background-color: #9E9E9E; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.invert_select_btn.clicked.connect(self.invert_selection)
+        selection_layout.addWidget(self.invert_select_btn)
+
+        self.clear_select_btn = QPushButton('清空选择', self)
+        self.clear_select_btn.setStyleSheet(
+            'background-color: #9E9E9E; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.clear_select_btn.clicked.connect(self.clear_selection)
+        selection_layout.addWidget(self.clear_select_btn)
+
+        selection_layout.addStretch(1)
+        main_layout.addLayout(selection_layout)
+
+        self.table = QTableWidget(self)
+        headers = ['学号', '姓名', '班级', '专业', '入学状态', '学费状态', '平均分', '挂科数', '审核状态', '毕业状态', '未通过原因']
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setStyleSheet("font: 18px Arial;")
+        self.table.horizontalHeader().setStyleSheet("font: 16px Arial; color: #4CAF50; font-weight: bold;")
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        main_layout.addWidget(self.table)
+
+        self.setLayout(main_layout)
+        self.load_students()
+
+    def select_all_rows(self):
+        self.table.clearSelection()
+        model = self.table.model()
+        selection_model = self.table.selectionModel()
+        for r in range(self.table.rowCount()):
+            selection_model.select(model.index(r, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
+
+    def invert_selection(self):
+        selected_rows = {idx.row() for idx in self.table.selectionModel().selectedRows()}
+        self.table.clearSelection()
+        model = self.table.model()
+        selection_model = self.table.selectionModel()
+        for r in range(self.table.rowCount()):
+            if r not in selected_rows:
+                selection_model.select(model.index(r, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
+
+    def clear_selection(self):
+        self.table.clearSelection()
+
+    def get_selected_student_ids(self):
+        rows = {idx.row() for idx in self.table.selectionModel().selectedRows()}
+        student_ids = []
+        for r in sorted(rows):
+            item = self.table.item(r, 0)
+            if item:
+                student_ids.append(item.text())
+        return student_ids
+
+    def compute_graduation_status(self, fail_count, tuition_status, enrollment_status):
+        enrollment_status = (enrollment_status or "").strip()
+        tuition_status = (tuition_status or "").strip()
+
+        if enrollment_status in {"退学", "开除"}:
+            return "肄业"
+        if fail_count is None:
+            fail_count = 0
+        if tuition_status and tuition_status not in {"已缴", "已交", "已缴费", "已交费"}:
+            return "未通过"
+        if fail_count == 0:
+            return "毕业"
+        if fail_count <= 2:
+            return "结业"
+        return "未通过"
+
+    def load_students(self):
+        self.table.setRowCount(0)
+        conn = connect_to_db()
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            student_id = self.student_id_filter.text().strip()
+            class_val = self.class_filter.text().strip()
+            major = self.major_filter.text().strip()
+
+            sql = """
+                SELECT
+                    s.StudentID,
+                    s.Name,
+                    s.Class,
+                    s.Major,
+                    s.EnrollmentStatus,
+                    s.TuitionStatus,
+                    AVG(CAST(g.Grade AS float)) AS AvgGrade,
+                    SUM(CASE WHEN g.Grade < 60 THEN 1 ELSE 0 END) AS FailCount,
+                    r.FinalReviewStatus,
+                    r.GraduationStatus,
+                    r.FailureReason
+                FROM PStudents s
+                LEFT JOIN PGrades g ON g.StudentID = s.StudentID
+                LEFT JOIN dbo.PGraduationReviews r ON r.StudentID = s.StudentID
+                WHERE 1=1
+            """
+            params = []
+            if student_id:
+                sql += " AND s.StudentID = ?"
+                params.append(student_id)
+            if class_val:
+                sql += " AND s.Class LIKE ?"
+                params.append(f"%{class_val}%")
+            if major:
+                sql += " AND s.Major LIKE ?"
+                params.append(f"%{major}%")
+
+            sql += """
+                GROUP BY s.StudentID, s.Name, s.Class, s.Major, s.EnrollmentStatus, s.TuitionStatus,
+                         r.FinalReviewStatus, r.GraduationStatus, r.FailureReason
+                ORDER BY s.StudentID
+            """
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+            for row_idx, row in enumerate(rows):
+                (sid, name, clazz, major_val, enroll_status, tuition_status, avg_grade, fail_count,
+                 final_review_status, grad_status, failure_reason) = row
+
+                if grad_status is None:
+                    grad_status = self.compute_graduation_status(fail_count, tuition_status, enroll_status)
+
+                review_status = final_review_status if final_review_status else "未发起"
+
+                self.table.insertRow(row_idx)
+                values = [
+                    sid,
+                    name,
+                    clazz,
+                    major_val,
+                    enroll_status,
+                    tuition_status,
+                    f"{avg_grade:.2f}" if avg_grade is not None else "",
+                    str(fail_count) if fail_count is not None else "0",
+                    review_status,
+                    grad_status,
+                    failure_reason if failure_reason else ""
+                ]
+                for col_idx, value in enumerate(values):
+                    item = QTableWidgetItem(str(value) if value is not None else "")
+                    item.setTextAlignment(Qt.AlignCenter)
+                    self.table.setItem(row_idx, col_idx, item)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载失败：{str(e)}")
+        finally:
+            conn.close()
+
+    def upsert_review(self, student_id, fields):
+        conn = connect_to_db()
+        if not conn:
+            return False
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM dbo.PGraduationReviews WHERE StudentID=?", (student_id,))
+            exists = cursor.fetchone() is not None
+            if not exists:
+                cursor.execute("INSERT INTO dbo.PGraduationReviews (StudentID) VALUES (?)", (student_id,))
+            set_clauses = []
+            params = []
+            for k, v in fields.items():
+                set_clauses.append(f"{k}=?")
+                params.append(v)
+            params.append(student_id)
+            cursor.execute(f"UPDATE dbo.PGraduationReviews SET {', '.join(set_clauses)} WHERE StudentID=?", params)
+            conn.commit()
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"更新失败：{str(e)}")
+            return False
+        finally:
+            conn.close()
+
+    def initiate_review(self):
+        student_ids = self.get_selected_student_ids()
+        if not student_ids:
+            QMessageBox.warning(self, "提示", "请先在表格中选中要发起审核的学生（可多选）。")
+            return
+        initiator, ok = QInputDialog.getText(self, "审核发起", "请输入发起人：", QLineEdit.Normal, "Admin")
+        if not ok:
+            return
+        initiator = initiator.strip()
+        if not initiator:
+            initiator = "Admin"
+        now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+        for sid in student_ids:
+            self.upsert_review(sid, {"InitiatedAt": now, "InitiatedBy": initiator, "FinalReviewStatus": "进行中"})
+        QMessageBox.information(self, "成功", "审核已发起。")
+        self.load_students()
+
+    def get_student_problems(self, student_id):
+        conn = connect_to_db()
+        if not conn:
+            return ["数据库连接失败"]
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT Name, Gender, Major, Class, EnrollmentStatus, TuitionStatus
+                FROM PStudents WHERE StudentID=?
+            """, (student_id,))
+            s = cursor.fetchone()
+            if not s:
+                return ["学籍信息不存在"]
+            name, gender, major, clazz, enroll_status, tuition_status = s
+            problems = []
+            if not name:
+                problems.append("姓名缺失")
+            if not gender:
+                problems.append("性别缺失")
+            if not major:
+                problems.append("专业缺失")
+            if not clazz:
+                problems.append("班级缺失")
+            if tuition_status and tuition_status not in {"已缴", "已交", "已缴费", "已交费"}:
+                problems.append("学费未缴清")
+            if enroll_status in {"退学", "开除"}:
+                problems.append("学籍异常")
+            cursor.execute("SELECT COUNT(1) FROM PGrades WHERE StudentID=? AND Grade < 60", (student_id,))
+            fail_count = cursor.fetchone()[0]
+            if fail_count and fail_count > 0:
+                problems.append(f"挂科{fail_count}门")
+            return problems
+        except Exception as e:
+            return [f"核对失败：{str(e)}"]
+        finally:
+            conn.close()
+
+    def class_check(self):
+        student_ids = self.get_selected_student_ids()
+        if not student_ids:
+            QMessageBox.warning(self, "提示", "请先选中要班级核对的学生（可多选）。")
+            return
+        now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+        for sid in student_ids:
+            problems = self.get_student_problems(sid)
+            status = "通过" if not problems else "不通过"
+            reason = "" if not problems else "；".join(problems)
+            self.upsert_review(sid, {"ClassCheckStatus": status, "ClassCheckedAt": now, "FailureReason": reason})
+        QMessageBox.information(self, "成功", "班级核对已完成。")
+        self.load_students()
+
+    def auto_mark_status(self):
+        student_ids = self.get_selected_student_ids()
+        if not student_ids:
+            QMessageBox.warning(self, "提示", "请先选中要标记状态的学生（可多选）。")
+            return
+        conn = connect_to_db()
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            for sid in student_ids:
+                cursor.execute("""
+                    SELECT s.EnrollmentStatus, s.TuitionStatus,
+                           SUM(CASE WHEN g.Grade < 60 THEN 1 ELSE 0 END) AS FailCount
+                    FROM PStudents s
+                    LEFT JOIN PGrades g ON g.StudentID=s.StudentID
+                    WHERE s.StudentID=?
+                    GROUP BY s.EnrollmentStatus, s.TuitionStatus
+                """, (sid,))
+                row = cursor.fetchone()
+                if row:
+                    enroll_status, tuition_status, fail_count = row
+                    status = self.compute_graduation_status(fail_count or 0, tuition_status, enroll_status)
+                    problems = self.get_student_problems(sid)
+                    reason = "" if status in {"毕业", "结业", "肄业"} and not problems else "；".join(problems)
+                    self.upsert_review(sid, {"GraduationStatus": status, "FailureReason": reason})
+            QMessageBox.information(self, "成功", "状态标记完成。")
+            self.load_students()
+        finally:
+            conn.close()
+
+    def final_review(self):
+        student_ids = self.get_selected_student_ids()
+        if not student_ids:
+            QMessageBox.warning(self, "提示", "请先选中要终审的学生（可多选）。")
+            return
+        now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+        for sid in student_ids:
+            problems = self.get_student_problems(sid)
+            status = "通过" if not problems else "不通过"
+            grad_status = "毕业" if status == "通过" else "未通过"
+            reason = "" if status == "通过" else ("；".join(problems) if problems else "未通过")
+            self.upsert_review(sid, {"FinalReviewStatus": status, "FinalReviewedAt": now, "GraduationStatus": grad_status, "FailureReason": reason})
+        QMessageBox.information(self, "成功", "终审已完成。")
+        self.load_students()
+
+    def generate_archives(self):
+        student_ids = self.get_selected_student_ids()
+        if not student_ids:
+            QMessageBox.warning(self, "提示", "请先选中要生成档案的学生（可多选）。")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "选择档案导出目录")
+        if not folder:
+            return
+        conn = connect_to_db()
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+            for sid in student_ids:
+                cursor.execute("""
+                    SELECT s.StudentID, s.Name, s.Gender, s.Major, s.Class, s.EnrollmentYear, s.EnrollmentStatus, s.TuitionStatus,
+                           r.FinalReviewStatus, r.GraduationStatus, r.FailureReason
+                    FROM PStudents s
+                    LEFT JOIN dbo.PGraduationReviews r ON r.StudentID=s.StudentID
+                    WHERE s.StudentID=?
+                """, (sid,))
+                row = cursor.fetchone()
+                if not row:
+                    continue
+                (student_id, name, gender, major, clazz, enroll_year, enroll_status, tuition_status,
+                 final_review_status, grad_status, failure_reason) = row
+                safe_name = name if name else "未知"
+                txt_path = f"{folder}/{student_id}_{safe_name}_毕业资格档案.txt"
+                pdf_path = f"{folder}/{student_id}_{safe_name}_毕业资格档案.pdf"
+                lines = [
+                    f"学生ID：{student_id}",
+                    f"姓名：{safe_name}",
+                    f"性别：{gender or ''}",
+                    f"专业：{major or ''}",
+                    f"班级：{clazz or ''}",
+                    f"入学年份：{enroll_year or ''}",
+                    f"入学状态：{enroll_status or ''}",
+                    f"学费状态：{tuition_status or ''}",
+                    f"终审审核：{final_review_status or ''}",
+                    f"毕业状态：{grad_status or ''}",
+                    f"未通过原因：{failure_reason or ''}",
+                    f"生成时间：{now}"
+                ]
+                with open(txt_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines))
+
+                writer = QPdfWriter(pdf_path)
+                writer.setResolution(120)
+                writer.setPageSize(QPageSize(QPageSize.A4))
+                try:
+                    writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Millimeter)
+                except Exception:
+                    pass
+                painter = QPainter(writer)
+                painter.setPen(Qt.black)
+                painter.setFont(QFont("Arial", 12))
+                paint_rect = writer.pageLayout().paintRectPixels(writer.resolution())
+                x = paint_rect.left()
+                y = paint_rect.top()
+                available_width = paint_rect.width()
+                line_spacing = painter.fontMetrics().height() + 10
+                for line in lines:
+                    painter.drawText(QRect(x, y, available_width, line_spacing), Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, line)
+                    y += line_spacing
+                    if y + line_spacing > paint_rect.top() + paint_rect.height():
+                        writer.newPage()
+                        y = paint_rect.top()
+                painter.end()
+                self.upsert_review(student_id, {"ArchiveGeneratedAt": now})
+
+            QMessageBox.information(self, "成功", "档案已生成。")
+            self.load_students()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"生成失败：{str(e)}")
+        finally:
+            conn.close()
+
+    def handle_exception(self):
+        student_ids = self.get_selected_student_ids()
+        if not student_ids:
+            QMessageBox.warning(self, "提示", "请先选中要处理异常的学生（可多选）。")
+            return
+        reason, ok = QInputDialog.getText(self, "异常处理", "请输入未通过原因：", QLineEdit.Normal, "")
+        if not ok:
+            return
+        reason = reason.strip()
+        now = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+        for sid in student_ids:
+            self.upsert_review(sid, {"FinalReviewStatus": "不通过", "FinalReviewedAt": now, "GraduationStatus": "未通过", "FailureReason": reason})
+        QMessageBox.information(self, "成功", "异常已标注。")
+        self.load_students()
+
+
+class DataStatisticsAnalysisModule(QWidget):
+    def __init__(self):
+        super().__init__()
+        ensure_graduation_review_tables()
+        self.current_title = ""
+        self.initUI()
+
+    def initUI(self):
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        title = QLabel('数据统计分析', self)
+        title.setStyleSheet("font: 24px Arial; color: #4CAF50; text-align: center;")
+        title.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(title)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        self.base_stats_btn = QPushButton('学籍基础统计', self)
+        self.base_stats_btn.setStyleSheet(
+            'background-color: #4CAF50; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.base_stats_btn.clicked.connect(self.load_base_stats)
+        btn_layout.addWidget(self.base_stats_btn)
+
+        self.change_stats_btn = QPushButton('异动数据统计', self)
+        self.change_stats_btn.setStyleSheet(
+            'background-color: #FF9800; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.change_stats_btn.clicked.connect(self.load_change_stats)
+        btn_layout.addWidget(self.change_stats_btn)
+
+        self.grade_stats_btn = QPushButton('成绩数据统计', self)
+        self.grade_stats_btn.setStyleSheet(
+            'background-color: #2196F3; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.grade_stats_btn.clicked.connect(self.load_grade_stats)
+        btn_layout.addWidget(self.grade_stats_btn)
+
+        self.grad_stats_btn = QPushButton('毕业数据统计', self)
+        self.grad_stats_btn.setStyleSheet(
+            'background-color: #9C27B0; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.grad_stats_btn.clicked.connect(self.load_graduation_stats)
+        btn_layout.addWidget(self.grad_stats_btn)
+
+        self.report_btn = QPushButton('报表输出', self)
+        self.report_btn.setStyleSheet(
+            'background-color: #607D8B; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.report_btn.clicked.connect(self.show_report_tools)
+        btn_layout.addWidget(self.report_btn)
+
+        main_layout.addLayout(btn_layout)
+
+        export_layout = QHBoxLayout()
+        export_layout.setSpacing(10)
+
+        self.export_csv_btn = QPushButton('导出Excel(CSV)', self)
+        self.export_csv_btn.setStyleSheet(
+            'background-color: #795548; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.export_csv_btn.clicked.connect(self.export_csv)
+        export_layout.addWidget(self.export_csv_btn)
+
+        self.export_pdf_btn = QPushButton('导出PDF', self)
+        self.export_pdf_btn.setStyleSheet(
+            'background-color: #3F51B5; color: white; font: 18px Arial; padding: 10px 20px; border-radius: 5px;')
+        self.export_pdf_btn.clicked.connect(self.export_pdf)
+        export_layout.addWidget(self.export_pdf_btn)
+
+        export_layout.addStretch(1)
+        main_layout.addLayout(export_layout)
+
+        self.summary_label = QLabel('', self)
+        self.summary_label.setStyleSheet("font: 18px Arial; color: #333333; padding: 10px;")
+        main_layout.addWidget(self.summary_label)
+
+        self.table = QTableWidget(self)
+        self.table.setStyleSheet("font: 18px Arial;")
+        self.table.horizontalHeader().setStyleSheet("font: 16px Arial; color: #4CAF50; font-weight: bold;")
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        main_layout.addWidget(self.table)
+
+        self.setLayout(main_layout)
+        self.load_base_stats()
+
+    def set_table(self, headers, rows):
+        self.table.setRowCount(0)
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        for r_idx, row in enumerate(rows):
+            self.table.insertRow(r_idx)
+            for c_idx, v in enumerate(row):
+                item = QTableWidgetItem(str(v) if v is not None else "")
+                item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(r_idx, c_idx, item)
+
+    def load_base_stats(self):
+        self.current_title = "学籍基础统计"
+        conn = connect_to_db()
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(1) FROM PStudents")
+            total = cursor.fetchone()[0]
+            cursor.execute("SELECT Gender, COUNT(1) FROM PStudents GROUP BY Gender")
+            gender_rows = cursor.fetchall()
+            cursor.execute("SELECT Class, COUNT(1) FROM PStudents GROUP BY Class ORDER BY COUNT(1) DESC")
+            class_rows = cursor.fetchall()
+            cursor.execute("SELECT EnrollmentYear, COUNT(1) FROM PStudents GROUP BY EnrollmentYear ORDER BY EnrollmentYear")
+            year_rows = cursor.fetchall()
+
+            summary = f"学生总人数：{total}"
+            if gender_rows:
+                gender_text = "，".join([f"{g or '未知'}:{c}" for g, c in gender_rows])
+                summary += f"；男女比例：{gender_text}"
+            self.summary_label.setText(summary)
+
+            headers = ["维度", "值", "人数"]
+            rows = []
+            for clazz, c in class_rows:
+                rows.append(["班级分布", clazz or "未知", c])
+            for y, c in year_rows:
+                rows.append(["年级趋势(入学年份)", y if y is not None else "未知", c])
+            for g, c in gender_rows:
+                rows.append(["性别比例", g or "未知", c])
+            self.set_table(headers, rows)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"统计失败：{str(e)}")
+        finally:
+            conn.close()
+
+    def load_change_stats(self):
+        self.current_title = "异动数据统计"
+        conn = connect_to_db()
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT EnrollmentStatus, COUNT(1) FROM PStudents GROUP BY EnrollmentStatus")
+            enroll_rows = cursor.fetchall()
+            cursor.execute("SELECT TuitionStatus, COUNT(1) FROM PStudents GROUP BY TuitionStatus")
+            tuition_rows = cursor.fetchall()
+
+            self.summary_label.setText("异动统计：按入学状态/学费状态汇总")
+
+            headers = ["维度", "状态", "人数"]
+            rows = []
+            for s, c in enroll_rows:
+                rows.append(["入学状态", s or "未知", c])
+            for s, c in tuition_rows:
+                rows.append(["学费状态", s or "未知", c])
+            self.set_table(headers, rows)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"统计失败：{str(e)}")
+        finally:
+            conn.close()
+
+    def load_grade_stats(self):
+        self.current_title = "成绩数据统计"
+        conn = connect_to_db()
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    AVG(CAST(Grade AS float)) AS AvgGrade,
+                    SUM(CASE WHEN Grade >= 90 THEN 1 ELSE 0 END) AS ExcellentCount,
+                    SUM(CASE WHEN Grade < 60 THEN 1 ELSE 0 END) AS FailCount,
+                    COUNT(1) AS TotalCount
+                FROM PGrades
+            """)
+            avg_grade, excellent_count, fail_count, total_count = cursor.fetchone()
+            excellent_rate = (excellent_count / total_count * 100) if total_count else 0
+            fail_rate = (fail_count / total_count * 100) if total_count else 0
+            self.summary_label.setText(f"平均分：{avg_grade:.2f}；优秀率(>=90)：{excellent_rate:.2f}%；挂科率(<60)：{fail_rate:.2f}%")
+
+            cursor.execute("""
+                SELECT TOP 20
+                    g.StudentID,
+                    s.Name,
+                    AVG(CAST(g.Grade AS float)) AS AvgGrade
+                FROM PGrades g
+                LEFT JOIN PStudents s ON s.StudentID=g.StudentID
+                GROUP BY g.StudentID, s.Name
+                ORDER BY AvgGrade DESC
+            """)
+            top_rows = cursor.fetchall()
+
+            headers = ["排名", "学号", "姓名", "平均分"]
+            rows = []
+            for idx, (sid, name, avg) in enumerate(top_rows, start=1):
+                rows.append([idx, sid, name or "", f"{avg:.2f}" if avg is not None else ""])
+            self.set_table(headers, rows)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"统计失败：{str(e)}")
+        finally:
+            conn.close()
+
+    def load_graduation_stats(self):
+        self.current_title = "毕业数据统计"
+        conn = connect_to_db()
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT GraduationStatus, COUNT(1)
+                FROM dbo.PGraduationReviews
+                GROUP BY GraduationStatus
+            """)
+            rows_raw = cursor.fetchall()
+            cursor.execute("SELECT COUNT(1) FROM PStudents")
+            total_students = cursor.fetchone()[0]
+            passed = 0
+            for status, c in rows_raw:
+                if status in {"毕业", "结业"}:
+                    passed += c
+            rate = (passed / total_students * 100) if total_students else 0
+            self.summary_label.setText(f"毕业相关数据：已标记通过人数(毕业/结业)：{passed}；占全部学生：{rate:.2f}%")
+
+            headers = ["毕业状态", "人数"]
+            rows = [(status or "未标记", c) for status, c in rows_raw]
+            self.set_table(headers, rows)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"统计失败：{str(e)}")
+        finally:
+            conn.close()
+
+    def show_report_tools(self):
+        self.summary_label.setText("报表输出：可导出当前表格为 Excel(CSV) 或 PDF。")
+
+    def export_csv(self):
+        if self.table.rowCount() == 0 or self.table.columnCount() == 0:
+            QMessageBox.warning(self, "提示", "当前没有可导出的数据。")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出为CSV", "", "CSV文件 (*.csv)")
+        if not file_path:
+            return
+        try:
+            export_table_to_csv(self.table, file_path)
+            QMessageBox.information(self, "成功", "CSV导出成功。")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败：{str(e)}")
+
+    def export_pdf(self):
+        if self.table.rowCount() == 0 or self.table.columnCount() == 0:
+            QMessageBox.warning(self, "提示", "当前没有可导出的数据。")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出为PDF", "", "PDF文件 (*.pdf)")
+        if not file_path:
+            return
+        try:
+            export_table_to_pdf(self.table, file_path, self.current_title or "数据统计")
+            QMessageBox.information(self, "成功", "PDF导出成功。")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败：{str(e)}")
